@@ -7,10 +7,11 @@ Controls:
   r - Rotate 90°     c - Colormap
   s - Shutter/NUC    g - Gain mode
   m - Mirror         h - Help
-  space - Screenshot d - Dump raw data
+  space - Screenshot D - Dump raw data
   e - Emissivity     1-9 - Set emissivity (0.1-0.9)
   x - Scale mode     p - Enhanced (CLAHE+DDE)
   a - AGC mode       t - Toggle reticule
+  d - Toggle DDE
 """
 
 from __future__ import annotations
@@ -459,7 +460,7 @@ class P3Viewer:
             "c-Color s-Shutter g-Gain",
             "m-Mirror h-Help  space-Shot",
             "e-Emissivity 1-9 Set ems",
-            "x-Scale p-Enhanced d-Dump",
+            "x-Scale p-Enhanced d-DDE D-Dump",
         ]
         overlay = img.copy()
         cv2.rectangle(overlay, (5, 30), (290, 130), (0, 0, 0), -1)
@@ -510,6 +511,8 @@ class P3Viewer:
         elif ord("1") <= key <= ord("9"):
             self._set_emissivity((key - ord("0")) / 10.0)
         elif key == ord("d"):
+            self._toggle_dde()
+        elif key == ord("D"):
             self._dump(thermal)
         elif key == ord(" "):
             self._screenshot()
@@ -540,6 +543,14 @@ class P3Viewer:
             self.use_clahe = False
             self.dde_strength = 0.0
         print(f"Enhanced: {'ON' if self.enhanced else 'OFF'}")
+
+    def _toggle_dde(self) -> None:
+        """Toggle DDE (Digital Detail Enhancement)."""
+        if self.dde_strength > 0:
+            self.dde_strength = 0.0
+        else:
+            self.dde_strength = 0.3
+        print(f"DDE: {'ON' if self.dde_strength > 0 else 'OFF'}")
 
     def _dump(self, thermal: NDArray[np.uint16]) -> None:
         """Dump raw thermal data to file."""

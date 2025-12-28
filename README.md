@@ -59,16 +59,21 @@ p3-viewer
 
 **Controls:**
 - `q` - Quit
+- `h` - Toggle help overlay
 - `c` - Cycle colormap
 - `a` - Cycle AGC mode
 - `d` - Toggle DDE (detail enhancement)
-- `n` - Toggle TNR (noise reduction)
+- `p` - Toggle enhanced mode (CLAHE + DDE)
+- `x` - Cycle scale/interpolation mode
 - `t` - Toggle reticule
 - `s` - Trigger shutter/NUC
 - `g` - Toggle gain mode (high/low)
-- `r` - Rotate display
+- `r` - Rotate display 90°
 - `m` - Mirror display
 - `+`/`-` - Zoom in/out
+- `e` - Cycle emissivity presets
+- `1-9` - Set emissivity (0.1-0.9)
+- `D` - Dump raw thermal data to file
 - `Space` - Screenshot
 
 ### Library
