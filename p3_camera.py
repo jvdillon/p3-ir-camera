@@ -13,6 +13,7 @@ See: https://github.com/jvdillon/p3-ir-camera/issues/2
 
 from __future__ import annotations
 
+import errno
 from enum import Enum, IntEnum
 from typing import TYPE_CHECKING, Any
 
@@ -21,6 +22,7 @@ import contextlib
 import dataclasses
 import logging
 import struct
+import sys
 import time
 
 import numpy as np
@@ -40,6 +42,16 @@ MARKER_SIZE = 12
 TEMP_SCALE = 64  # Raw values are in 1/64 Kelvin units
 KELVIN_OFFSET = 273.15
 FRAME_READ_CHUNK = 16384
+INTF_CTRL = 0
+INTF_STREAM = 1
+ALT_STREAM_OFF = 0
+ALT_STREAM_ON = 1
+# Interface 1 altsetting 1 exposes streaming endpoints:
+# - 0x81 bulk IN for frame data (used by read_frame)
+# - 0x02 bulk OUT for command traffic in protocol traces
+# This driver sends commands via control transfers and reads frames from 0x81.
+EP_STREAM_IN = 0x81
+EP_STREAM_OUT = 0x02
 
 
 class FrameMarkerMismatchError(Exception):
@@ -621,6 +633,7 @@ class P3Camera:
         default=None,
         repr=False,
     )  # array.array for chunk reads - array slicing creates a copy :(
+    _stream_ep_in: Any = dataclasses.field(default=None, repr=False)  # usb Endpoint
 
     def connect(self) -> None:
         """Connect to the camera."""
@@ -633,6 +646,7 @@ class P3Camera:
             )
         self._detach_kernel_drivers()
         self._claim_interfaces()
+        self._stream_ep_in = None
 
         # Pre-allocate frame buffer for efficient reads
         self._frame_buf = array.array("B", b"\x00" * self.config.frame_buffer_size)
@@ -643,6 +657,7 @@ class P3Camera:
         if self.streaming:
             self.stop_streaming()
         self.dev = None
+        self._stream_ep_in = None
 
     def init(self) -> tuple[str, str]:
         """Initialize camera and read device info.
@@ -742,6 +757,18 @@ class P3Camera:
         # Reset frame statistics
         self.stats = FrameStats()
 
+        if sys.platform == "darwin":
+            self._start_streaming_macos()
+        else:
+            self._start_streaming_default()
+
+        self.streaming = True
+
+    def _start_streaming_default(self) -> None:
+        """Start streaming using the existing Linux/Windows sequence."""
+        if self.dev is None:
+            raise RuntimeError("Not connected")
+
         # Initial start_stream with status checks
         self._send_command(COMMANDS["start_stream"])
         self._read_status()  # reads 0x02
@@ -756,9 +783,9 @@ class P3Camera:
         # Wait before configuring interface (per Windows tool timing)
         time.sleep(1.0)
 
-        # Configure streaming interface
-        self.dev.set_interface_altsetting(interface=1, alternate_setting=1)
-        self.dev.ctrl_transfer(0x40, 0xEE, 0, 1, None, 1000)
+        # Configure streaming interface before reading from endpoint 0x81
+        self._set_stream_altsetting_on()
+        self.dev.ctrl_transfer(0x40, 0xEE, 0, INTF_STREAM, None, 1000)
 
         # Wait for camera to be ready (Windows tool waits ~2 seconds)
         time.sleep(2.0)
@@ -766,7 +793,7 @@ class P3Camera:
         # Issue async bulk read before final start_stream (per Windows tool)
         # This read happens asynchronously in the Windows tool
         with contextlib.suppress(Exception):
-            self.dev.read(0x81, self.config.frame_size, 100)
+            self.dev.read(EP_STREAM_IN, self.config.frame_size, 100)
 
         # Final start_stream with status checks
         self._send_command(COMMANDS["start_stream"])
@@ -778,15 +805,52 @@ class P3Camera:
         if resp and resp[0] == 0x35:
             pass  # Camera acknowledges restart
 
-        self.streaming = True
+    def _start_streaming_macos(self) -> None:
+        """Start streaming using the macOS-friendly PyUSB/libusb sequence."""
+        if self.dev is None:
+            raise RuntimeError("Not connected")
+
+        # Initial start_stream handshake
+        self._send_command(COMMANDS["start_stream"])
+        self._read_status()
+        self._read_response(1)
+        self._read_status()
+
+        # Select interface 1 altsetting 1, then issue vendor stream start (0xEE).
+        self._set_stream_altsetting_on()
+        self.dev.ctrl_transfer(0x40, 0xEE, 0, INTF_STREAM, None, 1000)
+
+        # Give the camera time to switch into stream mode.
+        time.sleep(2.0)
+
+        # Final start_stream handshake
+        self._send_command(COMMANDS["start_stream"])
+        self._read_status()
+        self._read_response(1)
+        self._read_status()
 
     def stop_streaming(self) -> None:
         """Stop video streaming."""
         if self.streaming and self.dev is not None:
-            self.dev.set_interface_altsetting(interface=1, alternate_setting=0)
+            self.dev.set_interface_altsetting(
+                interface=INTF_STREAM,
+                alternate_setting=ALT_STREAM_OFF,
+            )
             self.streaming = False
+            self._stream_ep_in = None
 
-    def read_frame(self) -> bytes:
+    def read_stream_bytes(self, length: int, timeout: int = 10000) -> bytes:
+        """Read raw bytes from streaming endpoint."""
+        if self.dev is None or not self.streaming:
+            return b""
+        if sys.platform == "darwin":
+            if self._stream_ep_in is None:
+                self._set_stream_altsetting_on()
+            assert self._stream_ep_in is not None
+            return bytes(self._stream_ep_in.read(length, timeout=timeout))
+        return bytes(self.dev.read(EP_STREAM_IN, length, timeout))
+
+    def read_frame(self, include_end_marker: bool = False) -> bytes:
         """Read a complete frame from the camera.
 
         As per https://github.com/jvdillon/p3-ir-camera/issues/2 and P3_PROTOCOL.md,
@@ -811,6 +875,7 @@ class P3Camera:
 
         Returns:
             Complete frame: start marker (12) + pixel data (frame_size).
+            If include_end_marker=True, also includes trailing end marker (12).
 
         Raises:
             FrameMarkerMismatchError: If cnt1 doesn't match (when validate_markers=True).
@@ -832,7 +897,7 @@ class P3Camera:
         # This includes: start marker (12) + pixel data (frame_size) + end marker (12)
         pos = 0
         while pos < frame_read_size:
-            n = self.dev.read(0x81, chunk_buf, 10000)
+            n = self._read_stream_chunk(chunk_buf, 10000)
 
             next_pos = pos + n
 
@@ -884,6 +949,9 @@ class P3Camera:
         self.stats.frames_read += 1
         self.stats.last_cnt1 = start_cnt1
         self.stats.last_cnt3 = frame_cnt3
+
+        if include_end_marker:
+            return bytes(frame_buf_view[:frame_read_size])
 
         # Return complete frame: start marker + all pixel data
         return bytes(frame_buf_view[:frame_read_size-MARKER_SIZE])
@@ -947,7 +1015,7 @@ class P3Camera:
         # + full frame part 2 (8 * sensor_w)
         pos = 0
         while pos < frame_read_size:
-            n = self.dev.read(0x81, chunk_buf, 10000)
+            n = self._read_stream_chunk(chunk_buf, 10000)
 
             next_pos = pos + n
             frame_buf_view[pos:next_pos] = chunk_buf_view[:n]
@@ -1059,15 +1127,84 @@ class P3Camera:
         for cfg in self.dev:
             for intf in cfg:
                 try:
-                    if self.dev.is_kernel_driver_active(intf.bInterfaceNumber):
-                        self.dev.detach_kernel_driver(intf.bInterfaceNumber)
+                    if not self.dev.is_kernel_driver_active(intf.bInterfaceNumber):
+                        continue
+                except NotImplementedError:
+                    continue
                 except Exception:
-                    pass
+                    continue
+
+                try:
+                    self.dev.detach_kernel_driver(intf.bInterfaceNumber)
+                except usb.core.USBError as exc:
+                    err = getattr(exc, "errno", None)
+                    if sys.platform == "darwin" and err in (
+                        errno.EPERM,
+                        errno.EACCES,
+                        13,
+                    ):
+                        LOGGER.debug(
+                            "detach_kernel_driver(%s) failed with %s on macOS; "
+                            "continuing because claim_interface can still work",
+                            intf.bInterfaceNumber,
+                            exc,
+                        )
+                        continue
+                    # Preserve previous behavior: ignore detach failures.
+                    LOGGER.debug(
+                        "detach_kernel_driver(%s) failed: %s",
+                        intf.bInterfaceNumber,
+                        exc,
+                    )
+                except Exception:
+                    continue
 
     def _claim_interfaces(self) -> None:
         """Claim USB interfaces."""
         if self.dev is None:
             return
         self.dev.set_configuration()
-        usb.util.claim_interface(self.dev, 0)
-        usb.util.claim_interface(self.dev, 1)
+        usb.util.claim_interface(self.dev, INTF_CTRL)
+        usb.util.claim_interface(self.dev, INTF_STREAM)
+
+    def _set_stream_altsetting_on(self) -> None:
+        """Select stream interface 1 alt 1 and cache endpoint 0x81."""
+        if self.dev is None:
+            raise RuntimeError("Not connected")
+
+        # Streaming data is available only on interface 1 altsetting 1.
+        self.dev.set_interface_altsetting(
+            interface=INTF_STREAM,
+            alternate_setting=ALT_STREAM_ON,
+        )
+
+        cfg = self.dev.get_active_configuration()
+        intf = usb.util.find_descriptor(
+            cfg,
+            bInterfaceNumber=INTF_STREAM,
+            bAlternateSetting=ALT_STREAM_ON,
+        )
+        if intf is None:
+            raise RuntimeError("Streaming interface 1 alt 1 not found")
+
+        ep_in = usb.util.find_descriptor(intf, bEndpointAddress=EP_STREAM_IN)
+        if ep_in is None:
+            raise RuntimeError("Streaming endpoint 0x81 not found")
+        self._stream_ep_in = ep_in
+
+    def _read_stream_chunk(self, chunk_buf: array.array[int], timeout: int) -> int:
+        """Read one chunk from stream endpoint into a reusable buffer."""
+        if self.dev is None:
+            raise RuntimeError("Not connected")
+
+        if sys.platform != "darwin":
+            return self.dev.read(EP_STREAM_IN, chunk_buf, timeout)
+
+        if self._stream_ep_in is None:
+            self._set_stream_altsetting_on()
+        assert self._stream_ep_in is not None
+
+        data = self._stream_ep_in.read(len(chunk_buf), timeout=timeout)
+        n = len(data)
+        chunk_buf[:n] = data
+        return n

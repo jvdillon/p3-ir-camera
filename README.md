@@ -65,6 +65,24 @@ pyusb requires a libusb-compatible driver. Use [Zadig](https://zadig.akeo.ie/):
 4. Select **WinUSB** driver
 5. Click "Replace Driver"
 
+### USB Setup (macOS)
+
+Install libusb and PyUSB:
+
+```bash
+brew install libusb
+python -m pip install pyusb
+```
+
+On first connect, macOS may show a USB accessory permission prompt. Choose
+**Allow**.
+
+Smoke test (reads one frame and prints start/end markers + payload length):
+
+```bash
+python p3_smoke.py
+```
+
 ## Usage
 
 ### Viewer
@@ -143,7 +161,6 @@ are welcome!
 
 Some areas that could use help:
 
-- **macOS support** - USB handling on macOS
 - **GUI application** - Qt/GTK interface beyond the OpenCV viewer
 - **Recording/playback** - Video capture with thermal data preservation
 - **Radiometric analysis** - Region statistics, spot meters, isotherms
