@@ -25,4 +25,6 @@ venv/
 .pytest_cache/
 .ruff_cache/
 *.png
+!screenshots/*.png
+!data/*.png
 *.npy
