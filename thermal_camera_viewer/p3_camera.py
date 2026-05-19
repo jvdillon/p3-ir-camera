@@ -9,6 +9,11 @@ Supports:
 
 Protocol details based on USB traffic analysis by @aeternium.
 See: https://github.com/jvdillon/p3-ir-camera/issues/2
+
+Contains portions derived from p3-ir-camera (Apache-2.0):
+https://github.com/jvdillon/p3-ir-camera — see NOTICE in the repo root.
+
+SPDX-License-Identifier: Apache-2.0
 """
 
 from __future__ import annotations
@@ -21,6 +26,7 @@ import contextlib
 import dataclasses
 import logging
 import struct
+import sys
 import time
 
 import numpy as np
@@ -932,25 +938,18 @@ class P3Camera:
         frame_read_size = self.config.frame_read_size + shutter_seg_1_start
         chunk_buf = self._chunk_buf
 
-        # Use memoryviews to prevent copies
         frame_buf_view = memoryview(self._frame_buf)
-        chunk_buf_view = memoryview(chunk_buf)
 
-        # Read frame data into pre-allocated buffer
-        # This includes:
-        # --- first transfer ---
-        #   start marker (12)
-        # + partial frame pixel data (36 * sensor_w - 12)
-        # + full frame part 1 (764 * sensor_w)
-        # --- second transfer ---
-        # + end marker (12)
-        # + full frame part 2 (8 * sensor_w)
+        # Read frame data into pre-allocated buffer.
+        # Shutter response has a different layout than normal frames, so
+        # we use direct array assignment instead of memoryview slicing to
+        # avoid potential structure mismatches across PyUSB/Python versions.
         pos = 0
         while pos < frame_read_size:
-            n = self.dev.read(0x81, chunk_buf, 10000)
-
+            raw = self.dev.read(0x81, chunk_buf, 10000)
+            n = len(raw)
             next_pos = pos + n
-            frame_buf_view[pos:next_pos] = chunk_buf_view[:n]
+            self._frame_buf[pos:next_pos] = raw if isinstance(raw, array.array) else array.array("B", bytes(raw))
             pos = next_pos
 
         start_marker = parse_marker(frame_buf_view[:MARKER_SIZE])
@@ -1053,8 +1052,10 @@ class P3Camera:
         return "".join(result).strip()
 
     def _detach_kernel_drivers(self) -> None:
-        """Detach kernel drivers from USB interfaces."""
+        """Detach kernel drivers from USB interfaces (Linux only; no-op on Windows/macOS)."""
         if self.dev is None:
+            return
+        if sys.platform == "win32":
             return
         for cfg in self.dev:
             for intf in cfg:

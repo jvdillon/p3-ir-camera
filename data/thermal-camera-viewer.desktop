@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Thermal Camera Viewer
+Comment=USB thermal camera viewer with ROI analysis and color palettes
+Exec=thermal-camera-viewer
+Icon=thermal-camera-viewer
+Terminal=false
+Categories=Science;Graphics;Video;
+StartupWMClass=Thermal Camera Viewer
+Keywords=thermal;infrared;camera;temperature;

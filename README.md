@@ -1,157 +1,419 @@
-# P3 IR Camera
+# Thermal Camera Viewer
 
-Python driver and viewer for P3-series USB thermal cameras.  Improved? with lock-in thermography function.  See LOCK-IN.md
+A desktop application and virtual webcam driver for USB thermal cameras based on the Thermal Master P3/P1 (Vendor ID `0x3474`).
 
-![P3 Viewer - Keyboard](screenshots/jvdillon-keyboard.png)
-![P3 Viewer - Chip](screenshots/huberbenno-chip.png)
+Built on top of [jvdillon/p3-ir-camera](https://github.com/jvdillon/p3-ir-camera) — the original open-source Python driver and protocol documentation for P3-series thermal cameras. This project extends it with a full Qt GUI, installable packages for Linux and macOS, **native Windows viewer support** (same PyUSB stack as upstream), and a plug-and-play UVC virtual webcam driver (**Linux only**).
 
-Images courtesy of [jvdillon](https://github.com/jvdillon) and
-[huberbenno](https://github.com/huberbenno)
-([PR#11](https://github.com/jvdillon/p3-ir-camera/pull/11)).
+![Thermal Camera Viewer](screenshots/viewer.png)
 
-![ESP32](screenshots/esp32-lockin.png)
+## Supported Hardware
 
-**Devices**:
+| Model | PID | Resolution | Frame Rate |
+|-------|-----|-----------|------------|
+| P3 | `0x45A2` | 256 × 192 | 25 fps |
+| P1 | `0x45C2` | 160 × 120 | 25 fps |
 
-- P1: VID=0x3474, PID=0x45C2, 160×120 native resolution
-- P3: VID=0x3474, PID=0x45A2, 256×192 native resolution
-
-> **Disclaimer**: This is an independent open-source project. It is not
-> affiliated with, endorsed by, or connected to any camera manufacturer.
-> Protocol details were determined through USB traffic analysis and
-> experimentation.
+These are commonly sold as "Thermal Master P3", "InfiRay P2 Pro", and similar USB-C thermal cameras designed for smartphones. Any camera with VID `0x3474` and one of the above PIDs should work.
 
 ## Features
 
-- USB driver for frame capture and device control
-- Real-time thermal viewer with multiple colormaps
-- Temperature measurement at cursor position
-- Temporal noise reduction and digital detail enhancement
-- Multiple AGC modes (factory hardware AGC, temporal percentile, fixed range)
-- Shutter/NUC calibration control
-- High/Low gain mode switching
-- Rudimentary lock-in thermography for finding very small temperature changes
+### Viewer Application (Linux, macOS & Windows)
+
+- **Real-time thermal display** at 25 fps with mouse-over temperature readout
+- **Region of Interest (ROI)** — drag a box to see max/min/average temperature within the region, with small markers tracking the hottest and coldest points
+- **6 color palettes** — White Hot, Black Hot, Rainbow, Ironbow, Military, Sepia
+- **Image enhancement** — CLAHE + DDE (Detail Density Enhancement) + temporal noise reduction
+- **Screenshot** (PNG) and **video recording** (MP4 via FFmpeg)
+- **Rotate** (90° CW/CCW) and **flip** (horizontal/vertical)
+- **Zoom** — image-level zoom without window resizing
+- **Celsius / Fahrenheit** toggle
+- **Center reticle** and **color bar** overlays
+- **Hotspot markers** — global max/min temperature points
+- **Shutter / NUC** trigger, gain mode toggle, emissivity cycling
+- **Adaptive UI** — font sizes scale with window size; crosshair cursor on hover
+
+### UVC Virtual Webcam (Linux only)
+
+- **Plug-and-play** — camera automatically appears as `/dev/video10` when plugged in, disappears when unplugged
+- **Zero-config** — no `sudo` or manual commands needed after install
+- **Power-saving standby** — physical camera stays idle when no app is reading the virtual webcam; wakes automatically when an app opens the device
+- **Works with any V4L2 app** — Zoom, VLC, OBS, Google Meet, Cheese, etc.
 
 ## Installation
 
-```bash
-git clone https://github.com/jvdillon/p3-ir-camera
-cd p3-ir-camera
-pip install -e .
-```
+### Linux (Ubuntu / Debian)
 
-### USB Permissions (Linux)
+#### Prerequisites
 
-Create a udev rule to allow non-root access:
+Ubuntu 22.04+ or Debian 12+ (x86_64). The `.deb` package declares all dependencies; `apt` will install any missing ones.
+
+#### Build & Install
 
 ```bash
-sudo tee /etc/udev/rules.d/99-p3-ir.rules << EOF
-# P1 camera
-SUBSYSTEM=="usb", ATTR{idVendor}=="3474", ATTR{idProduct}=="45c2", MODE="0666"
-# P3 camera
-SUBSYSTEM=="usb", ATTR{idVendor}=="3474", ATTR{idProduct}=="45a2", MODE="0666"
-EOF
-sudo udevadm control --reload-rules
-sudo udevadm trigger
+git clone https://github.com/skywalker1905/thermal-camera-viewer.git
+cd thermal-camera-viewer
+./install.sh
 ```
 
-### USB Driver (Windows)
+The install script automatically builds the `.deb` package if needed, handles upgrades and broken states, and installs all dependencies.
 
-pyusb requires a libusb-compatible driver. Use [Zadig](https://zadig.akeo.ie/):
+Or build and install manually:
 
-1. Download and run Zadig
-2. Options → List All Devices
-3. Select the camera (VID 3474, PID 45C2 for P1 or 45A2 for P3)
-4. Select **WinUSB** driver
-5. Click "Replace Driver"
+```bash
+bash build-deb.sh
+sudo dpkg -i thermal-camera-viewer_*.deb
+sudo apt-get install -f
+```
+
+#### Uninstall (Linux)
+
+```bash
+sudo dpkg -r thermal-camera-viewer
+```
+
+### macOS
+
+#### Prerequisites
+
+- macOS 12+ (Monterey or later)
+- [Homebrew](https://brew.sh)
+
+#### Build & Install
+
+```bash
+git clone https://github.com/skywalker1905/thermal-camera-viewer.git
+cd thermal-camera-viewer
+./install.sh
+```
+
+The install script detects macOS, installs dependencies via Homebrew, creates an embedded Python venv inside the app bundle (PEP 668–safe), and copies `Thermal Camera Viewer.app` to `/Applications`.
+
+Or build manually:
+
+```bash
+bash build-macos.sh
+# Creates: dist/Thermal Camera Viewer.app
+# Drag to /Applications or run directly
+```
+
+#### Uninstall (macOS)
+
+```bash
+rm -rf "/Applications/Thermal Camera Viewer.app"
+rm -f /usr/local/bin/thermal-camera-viewer
+```
+
+> **Note**: The UVC virtual webcam feature is Linux-only (requires the `v4l2loopback` kernel module). On macOS and Windows, only the viewer application is available.
+
+### Windows
+
+#### Prerequisites
+
+- Windows 10 or 11 (64-bit)
+- [Python 3.10+](https://www.python.org/downloads/) on `PATH` (or `winget install Python.Python.3.12`)
+- [FFmpeg](https://ffmpeg.org/download.html) on `PATH` if you want **F5 MP4 recording** (optional)
+- **USB driver for PyUSB** (same as [upstream p3-ir-camera](https://github.com/jvdillon/p3-ir-camera#usb-driver-windows)): install **WinUSB** for the camera with [Zadig](https://zadig.akeo.ie/) (Options → List All Devices → device with **VID 3474** / PID **45A2** (P3) or **45C2** (P1) → WinUSB → Replace Driver).
+
+#### Install (PowerShell)
+
+From a clone of this repository:
+
+```powershell
+cd thermal-camera-viewer
+Set-ExecutionPolicy -Scope CurrentUser RemoteSigned -Force   # if scripts are blocked
+.\install-windows.ps1
+.\.venv\Scripts\python.exe -m thermal_camera_viewer
+```
+
+The script creates a project-local `.venv` and installs `PyQt5`, `numpy`, `opencv-python-headless`, `pyusb`, and **`libusb-package`** (ships `libusb-1.0` DLLs used by PyUSB on Windows).
+
+#### Portable / manual pip
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\pip install -U pip
+.\.venv\Scripts\pip install libusb-package numpy opencv-python-headless pyusb PyQt5
+.\.venv\Scripts\python.exe -m thermal_camera_viewer
+```
+
+#### Uninstall (Windows)
+
+Delete the project folder (and `.venv`). Remove the WinUSB driver in Device Manager if you need the original OEM driver back.
 
 ## Usage
 
 ### Viewer
 
+Launch from the application menu or from a terminal:
+
 ```bash
-# Use P3 camera (default, 256×192)
-p3-viewer
-
-# Use P1 camera (160×120)
-p3-viewer --model=p1
-
-# Use P3 camera explicitly
-p3-viewer --model=p3
-
-# Lock-in thermography - press 'l' once viewer is open
-p3-viewer --frequency 0.1 --integration 120
+thermal-camera-viewer
 ```
 
-**Controls:**
+On macOS, open "Thermal Camera Viewer" from the Applications folder or Launchpad.
 
-- `q` - Quit
-- `h` - Toggle help overlay
-- `c` - Cycle colormap
-- `a` - Cycle AGC mode
-- `d` - Toggle DDE (detail enhancement)
-- `p` - Toggle enhanced mode (CLAHE + DDE)
-- `x` - Cycle scale/interpolation mode
-- `t` - Toggle reticule
-- `s` - Trigger shutter/NUC
-- `g` - Toggle gain mode (high/low)
-- `r` - Rotate display 90°
-- `m` - Mirror display
-- `+`/`-` - Zoom in/out
-- `e` - Cycle emissivity presets
-- `1-9` - Set emissivity (0.1-0.9)
-- `D` - Dump raw thermal data to file
-- `Space` - Screenshot
-- `l` - Activate lock-in thermography (see lock-in.md)
-- `b` - Toggle min/max spot marker
-- `v` - Toggle colorbar
+On Windows, run `python -m thermal_camera_viewer` from the activated `.venv` (see above), or use `py -3.12 -m thermal_camera_viewer` if you installed dependencies globally.
 
-### Library
+Screenshots and recordings go to **Pictures** and **Videos** under your user profile (`%USERPROFILE%`).
 
-```python
-from p3_camera import Model, P3Camera, get_model_config, raw_to_celsius
+#### Keyboard Shortcuts
 
-# Use P3 camera (default)
-camera = P3Camera()
-# Or use P1 camera
-# camera = P3Camera(config=get_model_config(Model.P1))
+| Key | Action |
+|-----|--------|
+| `Space` | Screenshot (saved to `~/Pictures` on Linux/macOS, `%USERPROFILE%\Pictures` on Windows) |
+| `F5` | Start / stop recording (saved to `~/Videos` or `%USERPROFILE%\Videos`; requires `ffmpeg` on `PATH`) |
+| `R` | Rotate 90° clockwise |
+| `Shift+R` | Rotate 90° counter-clockwise |
+| `M` | Flip horizontal (mirror) |
+| `V` | Flip vertical |
+| `+` / `-` | Zoom in / out |
+| `C` | Cycle color palette |
+| `F` | Toggle °C / °F |
+| `N` | Toggle hotspot markers |
+| `T` | Toggle center reticle |
+| `B` | Toggle color bar |
+| `S` | Trigger shutter / NUC |
+| `G` | Toggle gain high / low |
+| `E` | Cycle emissivity |
+| `P` | Toggle enhanced mode (CLAHE + DDE) |
+| `H` | Help |
+| `Q` | Quit |
 
-camera.connect()
-camera.init()
-camera.start_streaming()
+#### Mouse
 
-ir_brightness, thermal_raw = camera.read_frame_both()
-temps_celsius = raw_to_celsius(thermal_raw)
+- **Hover** over the image to see the temperature at the cursor position
+- **Click and drag** to draw an ROI box showing max/min/average temperature
+- **Right-click** to clear the ROI
 
-# Center coordinates depend on model
-# P1: (59, 80), P3: (95, 128)
-print(f"Center temp: {temps_celsius[temps_celsius.shape[0]//2, temps_celsius.shape[1]//2]:.1f}C")
+### Virtual Webcam (Linux only)
 
-camera.stop_streaming()
-camera.disconnect()
+After installation, just plug in the camera. `/dev/video10` appears automatically. Open it in any webcam app:
+
+```bash
+# VLC
+vlc v4l2:///dev/video10
+
+# FFplay
+ffplay /dev/video10
+
+# Cheese
+cheese
 ```
 
-## Protocol Documentation
+For Zoom / Google Meet: select "ThermalCamera" from the camera dropdown.
 
-See [P3_PROTOCOL.md](P3_PROTOCOL.md) for USB protocol details.
+When you open the viewer app, it temporarily takes over the camera from the UVC driver. When you close the viewer, the UVC driver automatically resumes within 2 seconds.
 
-## Contributing
+## Architecture
 
-This project provides initial scaffolding for a P3 thermal camera application.
-There's significant potential to build something great here, and contributions
-are welcome!
+The Qt viewer (`viewer.py`) runs on **Linux, macOS, and Windows** (PyUSB + libusb). The **virtual webcam** path (`uvc_driver.py` → v4l2loopback) is **Linux-only**.
 
-Some areas that could use help:
+### System Components
 
-- **macOS support** - USB handling on macOS
-- **GUI application** - Qt/GTK interface beyond the OpenCV viewer
-- **Recording/playback** - Video capture with thermal data preservation
-- **Radiometric analysis** - Region statistics, spot meters, isotherms
-- **Calibration tools** - Blackbody calibration, emissivity tables
-- **Documentation** - Protocol details, hardware information
+```
+┌──────────────────────────────────────────────────────────────┐
+│  USB Camera (VID 0x3474)                                     │
+│  256×192 @ 25fps, 16-bit raw thermal + 8-bit IR              │
+└──────────────┬───────────────────────────────────────────────┘
+               │ USB bulk transfer (pyusb / libusb)
+               │
+    ┌──────────┴──────────┐
+    │                     │
+    ▼                     ▼
+┌────────────┐    ┌──────────────────┐
+│ viewer.py  │    │  uvc_driver.py   │
+│ (Qt GUI)   │    │  (Linux only)    │
+│            │    │                  │
+│ - display  │    │ - colormap       │
+│ - ROI      │    │ - CLAHE + DDE    │
+│ - record   │    │ - power saving   │
+│ - temp     │    │                  │
+└────────────┘    └────────┬─────────┘
+                           │ ioctl + write()
+                           ▼
+                  ┌──────────────────┐
+                  │  v4l2loopback    │
+                  │  /dev/video10    │
+                  └────────┬─────────┘
+                           │ V4L2 API
+                           ▼
+                  ┌──────────────────┐
+                  │ Zoom / VLC / OBS │
+                  └──────────────────┘
+```
 
-If you have a P3 camera and want to help improve this tool, PRs are welcome!
+### Hotplug Lifecycle (Linux)
+
+```
+Camera plugged in
+  └─ udev rule fires
+      └─ hotplug-add.sh (as root)
+          ├─ modprobe v4l2loopback → /dev/video10 created
+          └─ start uvc-watch (as user)
+              └─ uvc-watch (background watcher)
+                  └─ spawns uvc_driver.py
+                      ├─ no readers → standby (0.5 fps idle frame)
+                      └─ reader opens /dev/video10 → stream real thermal
+
+Camera unplugged
+  └─ uvc_driver.py detects USB gone → exits
+  └─ uvc-watch detects camera_present() false → EXIT trap
+      └─ cleanup: kill processes, fuser -k, modprobe -r
+          └─ /dev/video10 removed
+```
+
+### File Layout
+
+#### Linux (installed via .deb)
+
+```
+/opt/thermal-camera-viewer/
+├── thermal_camera_viewer/
+│   ├── __init__.py          # Package metadata
+│   ├── __main__.py          # python -m entry point
+│   ├── p3_camera.py         # USB protocol driver
+│   ├── viewer.py            # Qt GUI application
+│   └── uvc_driver.py        # Virtual webcam streamer
+├── hotplug-add.sh           # udev add handler (root)
+└── hotplug-remove.sh        # Cleanup helper (root via sudoers)
+
+/usr/bin/
+├── thermal-camera-viewer        # Viewer launcher
+├── thermal-camera-viewer-uvc    # UVC driver launcher
+└── thermal-camera-viewer-uvc-watch  # Lifecycle watcher
+
+/etc/
+├── udev/rules.d/99-thermal-camera-viewer.rules
+├── modprobe.d/thermal-camera-viewer.conf
+└── sudoers.d/thermal-camera-viewer
+```
+
+#### macOS (installed via build-macos.sh)
+
+```
+/Applications/Thermal Camera Viewer.app/
+└── Contents/
+    ├── Info.plist
+    ├── MacOS/
+    │   └── thermal-camera-viewer    # Shell launcher
+    └── Resources/
+        ├── thermal_camera_viewer/   # Python package
+        │   ├── __init__.py
+        │   ├── __main__.py
+        │   ├── p3_camera.py
+        │   ├── viewer.py
+        │   └── uvc_driver.py
+        └── icon.icns
+
+/usr/local/bin/thermal-camera-viewer   # CLI launcher (symlink)
+```
+
+### Source Files
+
+| File | Lines | Description |
+|------|-------|-------------|
+| `p3_camera.py` | ~1060 | USB protocol driver: connect, configure, stream, parse frames, temperature conversion. Based on the protocol work from [jvdillon/p3-ir-camera](https://github.com/jvdillon/p3-ir-camera). |
+| `viewer.py` | ~1190 | Qt5 GUI: thermal rendering, ROI analysis, overlays, recording, toolbar, keyboard shortcuts. |
+| `uvc_driver.py` | ~360 | v4l2loopback writer: opens the virtual device via ioctl, streams colormapped RGB frames, power-saving standby mode. Linux only. |
+| `build-deb.sh` | ~280 | Debian package builder: generates icons, creates launcher scripts, udev rules, hotplug handlers, and DEBIAN control files. |
+| `build-macos.sh` | ~150 | macOS .app bundle builder: generates .icns icon, creates Info.plist, bundles Python package. |
+
+### USB Protocol
+
+The camera uses a proprietary USB bulk transfer protocol:
+
+1. **Connect**: Claim USB interface 1, set alt setting 1
+2. **Init**: Send vendor control transfers to get device name and firmware version
+3. **Stream**: Continuous bulk reads from endpoint `0x81` in 16 KB chunks
+4. **Frame format**: Start marker (12 bytes) + frame data + end marker (12 bytes)
+5. **Frame data**: `(2H + 2) × W` rows of 16-bit values
+   - Rows `0..H-1`: 8-bit IR image (packed as 16-bit, use lower byte)
+   - Rows `H..H+1`: Metadata (calibration parameters, temperature references)
+   - Rows `H+2..2H+1`: 16-bit raw thermal data (1/64 Kelvin units)
+
+Temperature conversion: `T(°C) = raw / 64 - 273.15`, with environmental correction from metadata.
+
+For full protocol documentation, see [P3_PROTOCOL.md](https://github.com/jvdillon/p3-ir-camera/blob/main/P3_PROTOCOL.md) in the upstream project.
+
+## Development
+
+### Project Structure
+
+```
+thermal-camera-viewer/
+├── thermal_camera_viewer/       # Python package
+│   ├── __init__.py
+│   ├── __main__.py
+│   ├── p3_camera.py
+│   ├── viewer.py
+│   └── uvc_driver.py
+├── data/                        # Desktop entry and icons
+│   ├── thermal-camera-viewer.desktop
+│   └── thermal-camera-viewer-*.png
+├── build-deb.sh                 # Linux .deb package builder
+├── build-macos.sh               # macOS .app bundle builder
+├── install.sh                   # Linux / macOS installer
+├── install-windows.ps1          # Windows: venv + pip dependencies
+├── pyproject.toml               # Python project metadata
+├── .gitignore
+├── LICENSE
+└── README.md
+```
+
+### Running from Source
+
+#### Linux
+
+```bash
+sudo apt install python3-pyqt5 python3-numpy python3-opencv python3-usb \
+                 libusb-1.0-0 ffmpeg v4l2loopback-dkms
+
+echo 'SUBSYSTEM=="usb", ATTR{idVendor}=="3474", MODE="0666"' | \
+  sudo tee /etc/udev/rules.d/99-thermal-camera.rules
+sudo udevadm control --reload-rules
+
+python3 -m thermal_camera_viewer
+```
+
+#### macOS
+
+```bash
+brew install libusb ffmpeg python@3
+pip3 install pyqt5 numpy opencv-python-headless pyusb
+
+python3 -m thermal_camera_viewer
+```
+
+#### Windows
+
+```powershell
+# After .\install-windows.ps1 (or equivalent pip install into .venv)
+.\.venv\Scripts\python.exe -m thermal_camera_viewer
+```
+
+Use **Zadig + WinUSB** for the camera before first run; see [p3-ir-camera — USB driver (Windows)](https://github.com/jvdillon/p3-ir-camera#usb-driver-windows).
+
+### Building
+
+```bash
+# Linux
+bash build-deb.sh
+
+# macOS
+bash build-macos.sh
+```
+
+There is no bundled `.exe` installer yet; on Windows use `install-windows.ps1` or `pip install -e ".[windows]"` from a checkout.
+
+## Acknowledgments
+
+- [jvdillon/p3-ir-camera](https://github.com/jvdillon/p3-ir-camera) — the original open-source P3/P1 camera driver and protocol documentation that this project is built upon
+- USB protocol reverse engineering by [@aeternium](https://github.com/jvdillon/p3-ir-camera/issues/2)
+- [v4l2loopback](https://github.com/umlaeute/v4l2loopback) kernel module for virtual webcam support on Linux
 
 ## License
 
-Apache 2.0
+Licensed under the **Apache License, Version 2.0** (same as upstream
+[p3-ir-camera](https://github.com/jvdillon/p3-ir-camera)). See `LICENSE`.
+The driver in `thermal_camera_viewer/p3_camera.py` is derived from that
+project; see `NOTICE` for attribution.
