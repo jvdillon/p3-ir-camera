@@ -26,12 +26,12 @@ Detach kernel drivers, claim both interfaces before use.
 
 ## Control Transfers
 
-| bRequest | bmRequestType | wIndex | Purpose |
-|----------|---------------|--------|---------|
-| 0x20 | 0x41 | 0 | Send 18-byte command |
-| 0x21 | 0xC1 | 0 | Read response data |
-| 0x22 | 0xC1 | 0 | Read status (1 byte) |
-| 0xEE | 0x40 | 1 | Start streaming |
+| bRequest | bmRequestType | wIndex | Purpose               |
+|----------|---------------|--------|---------              |
+| 0x20     | 0x41          | 0      | Send 18-byte command  |
+| 0x21     | 0xC1          | 0      | Read response data    |
+| 0x22     | 0xC1          | 0      | Read status (1 byte)  |
+| 0xEE     | 0x40          | 1      | Start streaming       |
 
 ### USB Request Type Constants
 
@@ -101,14 +101,14 @@ Command types:
 
 ### Register Map
 
-| Register | Name | Read Size | Description |
-|----------|------|-----------|-------------|
-| 0x01 | model | 30 | Model name (e.g., "P3") |
-| 0x02 | fw_version | 12 | Firmware version (e.g., "00.00.02.17") |
-| 0x06 | part_number | 64 | Part number (e.g., "P30-1Axxxxxxxx") |
-| 0x07 | serial | 64 | Serial number |
-| 0x0a | hw_version | 64 | Hardware revision (e.g., "P3-00.04") |
-| 0x0f | model_long | 64 | Model name (64-byte version) |
+| Register | Name       | Read Size | Description                            |
+|----------|------      |-----------|-------------                           |
+| 0x01     | model      | 30        | Model name (e.g., "P3")                |
+| 0x02     | fw_version | 12        | Firmware version (e.g., "00.00.02.17") |
+| 0x06     | part_number| 64        | Part number (e.g., "P30-1Axxxxxxxx")   |
+| 0x07     | serial     | 64        | Serial number                          |
+| 0x0a     | hw_version | 64        | Hardware revision (e.g., "P3-00.04")   |
+| 0x0f     | model_long | 64        | Model name (64-byte version)           |
 
 ## Pre-computed Commands (with CRC)
 
@@ -193,10 +193,10 @@ dev.set_interface_altsetting(interface=1, alternate_setting=0)
 
 Frames are transmitted as **2 separate USB bulk transfers**:
 
-| Transfer | Size (P3) | Contents |
-|----------|-----------|----------|
-| 1 | 197,644 | Start marker (12) + pixel data (197,632) |
-| 2 | 12 | End marker |
+| Transfer | Size (P3) | Contents                                   |
+|----------|-----------|----------                                  |
+| 1        | 197,644   | Start marker (12) + pixel data (197,632)   |
+| 2        | 12        | End marker                                 |
 
 ```python
 MARKER_SIZE = 12
@@ -320,11 +320,11 @@ mode unless unplugged or reset.
 After manual shutter activation, the first frame is transmitted in a nonstandard fashion.
 There are 3 USB bulk transfers:
 
-| Transfer | Size (P3) | Contents |
-|----------|-----------|----------|
-| 1 | 204,800 | Start marker (12) + partial frame (9,204) + pixel data (195,584) |
-| 2 | 2,060 | Second start (?) marker (12) +  remaining pixel data (2,048) |
-| 3 | 12 | End marker (12) |
+| Transfer | Size (P3) | Contents                                                         |
+|----------|-----------|----------                                                        |
+| 1        | 204,800   | Start marker (12) + partial frame (9,204) + pixel data (195,584) |
+| 2        | 2,060     | Second start (?) marker (12) +  remaining pixel data (2,048)     |
+| 3        | 12        | End marker (12)                                                  |
 
 The partial frame data is the top 36 lines of the IR image minus the last 6 pixels and repeated
 in the full frame.

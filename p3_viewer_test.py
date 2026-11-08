@@ -1,217 +1,197 @@
-"""Unit tests for p3_viewer.py."""
+"""Regression tests for the replacement viewer (no camera or desktop required)."""
 
-from __future__ import annotations
+from decimal import Decimal
+from unittest.mock import Mock
 
-import sys
+import json
+import time
 
 import numpy as np
 import pytest
 
-from p3_viewer import (
-    COLORMAPS,
-    ColormapID,
-    agc_fixed,
-    agc_temporal,
-    apply_colormap,
-    dde,
-    get_colormap,
-    tnr,
+from p3_camera import P3Camera, raw_to_celsius
+from p3_thermal.acquisition import Acquisition, Frame
+from p3_thermal.canvas import ThermalCanvas
+from p3_thermal.export import save_snapshot
+from p3_thermal.processing import (
+    DisplaySettings,
+    Processor,
+    orient,
+    pixel_label,
+    temperature,
 )
 
 
-class TestColormaps:
-    """Tests for colormap functions."""
-
-    def test_all_colormaps_exist(self):
-        for cmap_id in ColormapID:
-            assert cmap_id in COLORMAPS
-            lut = COLORMAPS[cmap_id]
-            assert lut.shape == (256, 3)
-            assert lut.dtype == np.uint8
-
-    def test_get_colormap_by_id(self):
-        lut = get_colormap(ColormapID.WHITE_HOT)
-        assert lut.shape == (256, 3)
-
-    def test_get_colormap_by_int(self):
-        lut = get_colormap(0)  # WHITE_HOT
-        assert lut.shape == (256, 3)
-
-    def test_white_hot_is_grayscale(self):
-        lut = get_colormap(ColormapID.WHITE_HOT)
-        # White hot should go from black (0,0,0) to white (255,255,255)
-        assert lut[0, 0] == 0  # Black at start
-        assert lut[0, 1] == 0
-        assert lut[0, 2] == 0
-        assert lut[255, 0] == 255  # White at end
-        assert lut[255, 1] == 255
-        assert lut[255, 2] == 255
-
-    def test_black_hot_is_inverse_grayscale(self):
-        lut = get_colormap(ColormapID.BLACK_HOT)
-        # Black hot should go from white to black
-        assert lut[0, 0] == 255  # White at start
-        assert lut[255, 0] == 0  # Black at end
-
-    def test_apply_colormap_shape(self):
-        img = np.zeros((100, 100), dtype=np.uint8)
-        result = apply_colormap(img, ColormapID.IRONBOW)
-        assert result.shape == (100, 100, 3)
-        assert result.dtype == np.uint8
-
-    def test_apply_colormap_values(self):
-        # Create image with known values
-        img = np.array([[0, 127, 255]], dtype=np.uint8)
-        result = apply_colormap(img, ColormapID.WHITE_HOT)
-
-        # WHITE_HOT: 0 -> black, 255 -> white
-        assert np.all(result[0, 0] == [0, 0, 0])  # Black
-        assert np.all(result[0, 2] == [255, 255, 255])  # White
+def test_every_native_value_has_exact_decimal_readout():
+    for raw in range(65536):
+        exact = Decimal(raw) / 64 - Decimal("273.15")
+        assert pixel_label(raw) == f"{exact:.6f} °C"
+    values = np.arange(65536, dtype=np.uint16)
+    assert np.max(np.abs(raw_to_celsius(values) - temperature(values))) == 0
 
 
-class TestAGC:
-    """Tests for Auto Gain Control."""
-
-    def test_agc_temporal_basic(self):
-        # Reset EMA state
-        import p3_viewer
-
-        p3_viewer._agc_ema_low = None
-        p3_viewer._agc_ema_high = None
-
-        # Create image with values 1000-2000
-        img = np.linspace(1000, 2000, 100).reshape(10, 10).astype(np.uint16)
-        result = agc_temporal(img, pct=1.0)
-        assert result.shape == img.shape
-        assert result.dtype == np.uint8
-        assert result.min() >= 0
-        assert result.max() <= 255
-
-    def test_agc_temporal_percentile_clipping(self):
-        # Reset EMA state
-        import p3_viewer
-
-        p3_viewer._agc_ema_low = None
-        p3_viewer._agc_ema_high = None
-
-        # Create image with outliers
-        img = np.ones((10, 10), dtype=np.uint16) * 1000
-        img[0, 0] = 0  # Low outlier
-        img[9, 9] = 10000  # High outlier
-
-        # With percentile clipping, outliers should be clipped
-        result = agc_temporal(img, pct=10.0)
-        assert result.dtype == np.uint8
-
-    def test_agc_temporal_uniform_image(self):
-        # Reset EMA state
-        import p3_viewer
-
-        p3_viewer._agc_ema_low = None
-        p3_viewer._agc_ema_high = None
-
-        # Uniform image should not crash
-        img = np.ones((10, 10), dtype=np.uint16) * 5000
-        result = agc_temporal(img)
-        assert result.shape == img.shape
-
-    def test_agc_fixed_basic(self):
-        # Create image with temperature values around room temp
-        # Room temp ~25°C = (25 + 273.15) * 64 ≈ 19082 raw
-        img = np.linspace(18000, 20000, 100).reshape(10, 10).astype(np.uint16)
-        result = agc_fixed(img)
-        assert result.shape == img.shape
-        assert result.dtype == np.uint8
-
-    def test_agc_fixed_clips_extremes(self):
-        # Values outside 15-40°C range should be clipped
-        low_temp = int((15 + 273.15) * 64)  # ~18442
-        high_temp = int((40 + 273.15) * 64)  # ~20042
-        img = np.array([[low_temp - 1000, high_temp + 1000]], dtype=np.uint16)
-        result = agc_fixed(img)
-        # Low temp should map to 0, high temp should map to 255
-        assert result[0, 0] == 0
-        assert result[0, 1] == 255
-
-
-class TestDDE:
-    """Tests for Digital Detail Enhancement."""
-
-    def test_dde_basic(self):
-        img = np.random.randint(0, 256, (50, 50), dtype=np.uint8)
-        result = dde(img)
-        assert result.shape == img.shape
-        assert result.dtype == np.uint8
-
-    def test_dde_zero_strength(self):
-        img = np.random.randint(0, 256, (50, 50), dtype=np.uint8)
-        result = dde(img, strength=0)
-        np.testing.assert_array_equal(result, img)
-
-    def test_dde_enhances_edges(self):
-        # Create image with sharp edge
-        img = np.zeros((20, 20), dtype=np.uint8)
-        img[:, 10:] = 200
-
-        result = dde(img, strength=1.0, kernel_size=3)
-
-        # Edge should be more pronounced (higher gradient)
-        edge_original = np.abs(img[:, 9].astype(int) - img[:, 10].astype(int)).mean()
-        edge_enhanced = np.abs(
-            result[:, 9].astype(int) - result[:, 10].astype(int)
-        ).mean()
-        assert edge_enhanced >= edge_original
-
-
-class TestTNR:
-    """Tests for Temporal Noise Reduction."""
-
-    def test_tnr_first_frame(self):
-        img = np.ones((10, 10), dtype=np.uint16) * 1000
-        result = tnr(img, None)
-        np.testing.assert_array_equal(result, img)
-
-    def test_tnr_blending(self):
-        prev = np.zeros((10, 10), dtype=np.uint16)
-        curr = np.ones((10, 10), dtype=np.uint16) * 1000
-
-        # 50% blend
-        result = tnr(curr, prev, alpha=0.5)
-        expected = 500
-        assert result[0, 0] == pytest.approx(expected, abs=1)
-
-    def test_tnr_alpha_zero(self):
-        prev = np.ones((10, 10), dtype=np.uint16) * 100
-        curr = np.ones((10, 10), dtype=np.uint16) * 200
-
-        # alpha=0 means all previous frame
-        result = tnr(curr, prev, alpha=0)
-        np.testing.assert_array_almost_equal(result, prev)
-
-    def test_tnr_alpha_one(self):
-        prev = np.ones((10, 10), dtype=np.uint16) * 100
-        curr = np.ones((10, 10), dtype=np.uint16) * 200
-
-        # alpha=1 means all current frame
-        result = tnr(curr, prev, alpha=1.0)
-        np.testing.assert_array_almost_equal(result, curr)
-
-
-def _run_tests(test_file: str) -> None:
-    """Run pytest on this file."""
-    sys.exit(
-        pytest.main(
-            [
-                test_file,
-                "-v",
-                "-s",
-                "-W",
-                "ignore::pytest.PytestAssertRewriteWarning",
-                *sys.argv[1:],
-            ]
+@pytest.mark.parametrize("rotation", range(4))
+@pytest.mark.parametrize("mirror", [False, True])
+def test_hover_uses_native_coordinates_after_all_transforms(rotation, mirror):
+    raw = np.arange(12, dtype=np.uint16).reshape(3, 4)
+    coords = np.moveaxis(np.indices(raw.shape), 0, -1)
+    canvas = Mock()
+    canvas.raw = orient(raw, rotation, mirror)
+    canvas.coordinates = orient(coords, rotation, mirror)
+    canvas.pixel_scale = 128
+    canvas.offset = [-40.5, 17.2]
+    canvas.legend_rect = None
+    for y, x in np.ndindex(canvas.raw.shape):
+        canvas.cell_at = lambda px, py: ThermalCanvas.cell_at(canvas, px, py)
+        ThermalCanvas.pick(
+            canvas,
+            canvas.offset[0] + (x + 0.5) * 128,
+            canvas.offset[1] + (y + 0.5) * 128,
         )
+        sx, sy, sample = canvas.on_pixel.call_args.args[0]
+        assert sample == raw[sy, sx]
+    ThermalCanvas.pick(canvas, canvas.offset[0] - 0.1, canvas.offset[1])
+    canvas.on_pixel.assert_called_with(None)
+
+
+def test_filter_and_palettes_preserve_raw_samples():
+    raw = np.arange(64, dtype=np.uint16).reshape(8, 8) + 19000
+    original = raw.copy()
+    processor = Processor()
+    settings = DisplaySettings(mode="Filtered temperature")
+    processor.render(raw, np.zeros((8, 8), np.uint8), settings)
+    newer = raw + 64
+    processor.render(newer, np.zeros((8, 8), np.uint8), settings)
+    assert np.allclose(processor.previous, temperature(raw) + 0.35)
+    np.testing.assert_array_equal(raw, original)
+    processor.reset()
+    assert processor.previous is None and processor.bounds is None
+
+
+@pytest.mark.parametrize(
+    "mode", ["Temperature", "Filtered temperature", "Raw counts", "Factory brightness"]
+)
+def test_all_sources_render_uniform_frames(mode):
+    raw = np.full((8, 8), 19000, np.uint16)
+    rgb, limits = Processor().render(
+        raw, np.full((8, 8), 100, np.uint8), DisplaySettings(mode=mode)
     )
+    assert rgb.shape == (8, 8, 3) and rgb.dtype == np.uint8
+    if mode == "Factory brightness":
+        assert limits == (100.0, 100.0)
+    else:
+        assert limits is not None
 
 
-if __name__ == "__main__":
-    _run_tests(__file__)
+def test_fixed_range_validation():
+    with pytest.raises(ValueError):
+        Processor().render(
+            np.ones((8, 8), np.uint16),
+            None,
+            DisplaySettings(range_mode="Fixed", minimum=40, maximum=15),
+        )
+
+
+def test_lossless_snapshot(tmp_path):
+    frame = Frame(
+        np.arange(12, dtype=np.uint16).reshape(3, 4), np.zeros((3, 4), np.uint8), 12.5
+    )
+    path = tmp_path / "capture.npz"
+    save_snapshot(path, frame, {"model": "p3", "demo": False})
+    with np.load(path, allow_pickle=False) as data:
+        np.testing.assert_array_equal(data["raw"], frame.raw)
+        assert json.loads(str(data["metadata"]))["raw_unit"] == "1/64 K"
+
+
+def test_disconnect_releases_resources_even_if_stop_fails(monkeypatch):
+    camera = P3Camera(dev=Mock(), streaming=True)
+    device = camera.dev
+    device.set_interface_altsetting.side_effect = RuntimeError("unplugged")
+    dispose = Mock()
+    monkeypatch.setattr("p3_camera.usb.util.dispose_resources", dispose)
+    with pytest.raises(RuntimeError):
+        camera.disconnect()
+    dispose.assert_called_once_with(device)
+    assert camera.dev is None and not camera.streaming
+
+
+def test_worker_cleanup_on_initialization_failure():
+    camera = Mock()
+    camera.init.side_effect = RuntimeError("initialization failed")
+    worker = Acquisition(camera_factory=lambda **kwargs: camera)
+    worker.start()
+    worker.join(2)
+    assert not worker.is_alive()
+    camera.disconnect.assert_called_once()
+
+
+def test_demo_handoff_is_bounded_and_stops():
+    worker = Acquisition(demo=True)
+    worker.start()
+    frame = worker.frames.get(timeout=2)
+    assert frame.raw.shape == (192, 256)
+    time.sleep(0.15)
+    assert worker.frames.qsize() == 1
+    worker.stop_event.set()
+    worker.join(2)
+    assert not worker.is_alive()
+
+
+def test_frame_read_can_be_cancelled_before_usb_read():
+    import array
+    import threading
+
+    camera = P3Camera(dev=Mock(), streaming=True)
+    camera._frame_buf = array.array("B", b"\0" * camera.config.frame_buffer_size)
+    camera._chunk_buf = array.array("B", b"\0" * 16384)
+    camera.cancel_event = threading.Event()
+    camera.cancel_event.set()
+    with pytest.raises(InterruptedError):
+        camera.read_frame()
+    camera.dev.read.assert_not_called()
+
+
+def test_usb_poll_timeout_retries_until_cancelled():
+    import array
+    import threading
+
+    import usb.core
+
+    camera = P3Camera(dev=Mock(), streaming=True)
+    camera._frame_buf = array.array("B", b"\0" * camera.config.frame_buffer_size)
+    camera._chunk_buf = array.array("B", b"\0" * 16384)
+    camera.cancel_event = threading.Event()
+
+    def timeout(*args):
+        camera.cancel_event.set()
+        raise usb.core.USBTimeoutError("poll timeout")
+
+    camera.dev.read.side_effect = timeout
+    with pytest.raises(InterruptedError):
+        camera.read_frame()
+    camera.dev.read.assert_called_once()
+
+
+def test_control_timeout_does_not_discard_live_session():
+    import usb.core
+
+    camera = Mock()
+    camera.init.return_value = ("P3", "test")
+    camera.trigger_shutter.side_effect = usb.core.USBTimeoutError("ACK timeout")
+    worker = Acquisition(camera_factory=lambda **kwargs: camera)
+
+    def read_frame():
+        worker.stop_event.set()
+        return np.zeros((8, 8), np.uint8), np.full((8, 8), 19000, np.uint16)
+
+    camera.read_frame_both.side_effect = read_frame
+    worker.commands.put(("shutter", None))
+    worker.start()
+    worker.join(2)
+    assert not worker.is_alive()
+    assert worker.frames.get_nowait().raw[0, 0] == 19000
+    camera.disconnect.assert_called_once()
+    events = []
+    while not worker.events.empty():
+        events.append(worker.events.get_nowait())
+    assert any("Command timed out" in event for event in events)

@@ -1,20 +1,23 @@
 
 from __future__ import annotations
 
+from collections import deque
+
+import contextlib
 import math
 import threading
 import time
-from typing import Any, Optional, Tuple
-from collections import deque
 
 import numpy as np
 
+
 try:
     import serial
-except Exception as exc:  # pragma: no cover - runtime missing dependency
+except Exception:  # pragma: no cover - runtime missing dependency
     serial = None  # type: ignore
 
 from p3_camera import P3Camera
+
 
 class LockInController:
     """Controller to perform lock-in demodulation in a background thread.
@@ -47,7 +50,7 @@ class LockInController:
         self.invert = bool(invert)
 
         self._stop_event = threading.Event()
-        self._thread: Optional[threading.Thread] = None
+        self._thread: threading.Thread | None = None
         self._lock = threading.Lock()
         # protect accumulator / latest-result access
         self._data_lock = threading.Lock()
@@ -56,10 +59,10 @@ class LockInController:
         self._frame_cond = threading.Condition()
         self._frame_queue: deque[tuple[float, np.ndarray]] = deque()
 
-        self._last_in_phase: Optional[np.ndarray] = None
-        self._last_quadrature: Optional[np.ndarray] = None
-        self._last_amplitude: Optional[np.ndarray] = None
-        self._last_angle: Optional[np.ndarray] = None
+        self._last_in_phase: np.ndarray | None = None
+        self._last_quadrature: np.ndarray | None = None
+        self._last_amplitude: np.ndarray | None = None
+        self._last_angle: np.ndarray | None = None
 
     def start_background(self) -> threading.Thread:
         """Start a background thread to run a single integration and return the Thread."""
@@ -76,12 +79,12 @@ class LockInController:
                 )
             try:
                 ser_test = SerialClass(self.port, self.baud_rate, timeout=1)
-                try:
+                with contextlib.suppress(Exception):
                     ser_test.close()
-                except Exception:
-                    pass
             except Exception as exc:  # fail early
-                raise RuntimeError(f"Failed to open serial port {self.port}: {exc}")
+                raise RuntimeError(
+                    f"Failed to open serial port {self.port}: {exc}"
+                ) from exc
 
             # Initialize placeholder results so viewer can show panes immediately
             h = self.camera.config.sensor_h
@@ -97,7 +100,7 @@ class LockInController:
             self._thread.start()
             return self._thread
 
-    def push_frame(self, thermal: np.ndarray, timestamp: Optional[float] = None) -> None:
+    def push_frame(self, thermal: np.ndarray, timestamp: float | None = None) -> None:
         """Push a thermal frame (uint16 or float) into the controller.
 
         The background worker will consume frames from this queue and use the
@@ -123,7 +126,7 @@ class LockInController:
         if wait and th is not None:
             th.join()
 
-    def get_latest(self) -> Tuple[Optional[np.ndarray], Optional[np.ndarray], Optional[np.ndarray], Optional[np.ndarray]]:
+    def get_latest(self) -> tuple[np.ndarray | None, np.ndarray | None, np.ndarray | None, np.ndarray | None]:
         """Return the most recent (in_phase, quadrature, amplitude, angle) tuple, or (None, None, None, None)."""
         with self._data_lock:
             # If final/interim published results exist, return them
@@ -175,15 +178,15 @@ class LockInController:
         try:
             ser = serial.Serial(self.port, self.baud_rate, timeout=1)
         except Exception as exc:
-            raise RuntimeError(f"Failed to open serial port {self.port}: {exc}")
+            raise RuntimeError(
+                f"Failed to open serial port {self.port}: {exc}"
+            ) from exc
 
         def _write_state(on: bool) -> None:
-            try:
+            with contextlib.suppress(Exception):
                 if ser:
                     val = b"1\n" if on ^ self.invert else b"0\n"
                     ser.write(val)
-            except Exception:
-                pass
 
         # Ensure initial state
         _write_state(load_on)
@@ -287,15 +290,9 @@ class LockInController:
             return
 
         finally:
-            try:
+            with contextlib.suppress(Exception):
                 if ser:
-                    try:
+                    with contextlib.suppress(Exception):
                         ser.write(b"0\n")
-                    except Exception:
-                        pass
-                    try:
+                    with contextlib.suppress(Exception):
                         ser.close()
-                    except Exception:
-                        pass
-            except Exception:
-                pass

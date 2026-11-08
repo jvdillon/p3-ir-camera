@@ -21,6 +21,7 @@ import contextlib
 import dataclasses
 import logging
 import struct
+import threading
 import time
 
 import numpy as np
@@ -253,10 +254,10 @@ COMMANDS: dict[str, bytes] = {
 # =============================================================================
 
 
-def raw_to_kelvin(raw: float | NDArray[np.uint16]) -> float | NDArray[np.float32]:
+def raw_to_kelvin(raw: float | NDArray[np.uint16]) -> float | NDArray[np.float64]:
     """Convert raw sensor value to Kelvin.
 
-    Raw values are in 1/64 Kelvin units (centikelvin).
+    Raw values are in 1/64 Kelvin units (0.015625 K per count).
 
     Args:
         raw: Raw 16-bit sensor value(s).
@@ -265,12 +266,12 @@ def raw_to_kelvin(raw: float | NDArray[np.uint16]) -> float | NDArray[np.float32
         Temperature in Kelvin.
 
     """
-    return np.float32(raw) / TEMP_SCALE
+    return np.asarray(raw, dtype=np.float64) / TEMP_SCALE
 
 
 def kelvin_to_celsius(
-    kelvin: float | NDArray[np.float32],
-) -> float | NDArray[np.float32]:
+    kelvin: float | NDArray[np.float64],
+) -> float | NDArray[np.float64]:
     """Convert Kelvin to Celsius.
 
     Args:
@@ -296,7 +297,7 @@ def celsius_to_kelvin(celsius: float) -> float:
     return celsius + KELVIN_OFFSET
 
 
-def raw_to_celsius(raw: float | NDArray[np.uint16]) -> float | NDArray[np.float32]:
+def raw_to_celsius(raw: float | NDArray[np.uint16]) -> float | NDArray[np.float64]:
     """Convert raw sensor value directly to Celsius.
 
     Formula: (raw / 64) - 273.15
@@ -612,6 +613,7 @@ class P3Camera:
     env_params: EnvParams = dataclasses.field(default_factory=EnvParams)
     config: ModelConfig = dataclasses.field(default_factory=lambda: _DEFAULT_CONFIG)
     stats: FrameStats = dataclasses.field(default_factory=FrameStats)
+    cancel_event: threading.Event | None = dataclasses.field(default=None, repr=False)
     validate_markers: bool = True  # Enable marker validation (cnt1 matching)
     _frame_buf: array.array[int] | None = dataclasses.field(
         default=None,
@@ -640,9 +642,15 @@ class P3Camera:
 
     def disconnect(self) -> None:
         """Disconnect from the camera."""
-        if self.streaming:
+        try:
             self.stop_streaming()
-        self.dev = None
+        finally:
+            try:
+                if self.dev is not None:
+                    usb.util.dispose_resources(self.dev)
+            finally:
+                self.dev = None
+                self._frame_buf = self._chunk_buf = None
 
     def init(self) -> tuple[str, str]:
         """Initialize camera and read device info.
@@ -657,13 +665,13 @@ class P3Camera:
         self._read_status()  # ACK
         name = bytes(self._read_response(30))
         self._read_status()  # ACK
-        name_str = name.rstrip(b"\x00").decode(errors="replace")
+        name_str = name.split(b"\x00", 1)[0].decode(errors="replace")
 
         self._send_command(COMMANDS["read_version"])
         self._read_status()  # ACK
         version = bytes(self._read_response(12))
         self._read_status()  # ACK
-        version_str = version.rstrip(b"\x00").decode(errors="replace")
+        version_str = version.split(b"\x00", 1)[0].decode(errors="replace")
 
         return name_str, version_str
 
@@ -758,6 +766,8 @@ class P3Camera:
 
         # Configure streaming interface
         self.dev.set_interface_altsetting(interface=1, alternate_setting=1)
+        # Mark ownership immediately so partial initialization is cleaned up.
+        self.streaming = True
         self.dev.ctrl_transfer(0x40, 0xEE, 0, 1, None, 1000)
 
         # Wait for camera to be ready (Windows tool waits ~2 seconds)
@@ -782,8 +792,10 @@ class P3Camera:
 
     def stop_streaming(self) -> None:
         """Stop video streaming."""
-        if self.streaming and self.dev is not None:
-            self.dev.set_interface_altsetting(interface=1, alternate_setting=0)
+        try:
+            if self.streaming and self.dev is not None:
+                self.dev.set_interface_altsetting(interface=1, alternate_setting=0)
+        finally:
             self.streaming = False
 
     def read_frame(self) -> bytes:
@@ -831,8 +843,16 @@ class P3Camera:
         # Read frame data into pre-allocated buffer
         # This includes: start marker (12) + pixel data (frame_size) + end marker (12)
         pos = 0
+        deadline = time.monotonic() + 5.0
         while pos < frame_read_size:
-            n = self.dev.read(0x81, chunk_buf, 10000)
+            if self.cancel_event is not None and self.cancel_event.is_set():
+                raise InterruptedError("Camera acquisition cancelled")
+            if time.monotonic() >= deadline:
+                raise TimeoutError("Camera frame acquisition exceeded five seconds")
+            try:
+                n = self.dev.read(0x81, chunk_buf, 500)
+            except usb.core.USBTimeoutError:
+                continue
 
             next_pos = pos + n
 
@@ -946,8 +966,16 @@ class P3Camera:
         # + end marker (12)
         # + full frame part 2 (8 * sensor_w)
         pos = 0
+        deadline = time.monotonic() + 5.0
         while pos < frame_read_size:
-            n = self.dev.read(0x81, chunk_buf, 10000)
+            if self.cancel_event is not None and self.cancel_event.is_set():
+                raise InterruptedError("Camera acquisition cancelled")
+            if time.monotonic() >= deadline:
+                raise TimeoutError("Camera frame acquisition exceeded five seconds")
+            try:
+                n = self.dev.read(0x81, chunk_buf, 500)
+            except usb.core.USBTimeoutError:
+                continue
 
             next_pos = pos + n
             frame_buf_view[pos:next_pos] = chunk_buf_view[:n]
@@ -960,7 +988,6 @@ class P3Camera:
 
         start_cnt1 = int(start_marker["cnt1"][0])
         end_cnt1 = int(end_marker["cnt1"][0])
-        frame_cnt3 = int(end_marker["cnt3"][0])
 
         # Validate cnt1 matches between start and end markers
         if start_cnt1 != end_cnt1:
@@ -995,7 +1022,8 @@ class P3Camera:
         elif mode == GainMode.HIGH:
             self._send_command(COMMANDS["gain_high"])
             self._read_status()  # ACK after write
-        # AUTO mode requires firmware support (not implemented in protocol)
+        else:
+            raise ValueError("Automatic gain is not implemented by this protocol")
         self.gain_mode = mode
 
     # Private methods

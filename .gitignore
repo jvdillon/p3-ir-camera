@@ -26,3 +26,6 @@ venv/
 .ruff_cache/
 *.png
 *.npy
+
+# Application screenshots used by the README
+!screenshots/thermal-studio-*.png

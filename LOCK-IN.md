@@ -1,3 +1,5 @@
+> **Historical experiment:** the instructions and CLI flags below belong to the retired OpenCV demo. Thermal Studio does not currently integrate lock-in. The source remains in `lockin.py`; see [extension architecture](docs/ARCHITECTURE.md).
+
 WIP/beta lock-in thermography functionality for P1/P3 thermal camera by @hazardousvoltage
 
 The idea and skeleton of the lock-in functionality came from [GitHub - diminDDL/IR-Py-Thermal: Python Thermal Camera Library](https://github.com/diminDDL/IR-Py-Thermal)
